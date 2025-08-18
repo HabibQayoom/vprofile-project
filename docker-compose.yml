@@ -1,48 +1,149 @@
+version: '3.8'
+
 services:
   vprodb:
     build: 
       context: ./Docker-files/db
-    image: vprocontainers/vprofiledb
+      dockerfile: Dockerfile
+    image: vprocontainers/vprofiledb:latest
     container_name: vprodb
     ports:
-      - "3306:3306"
+      - "${DB_PORT:-3306}:3306"
     volumes:
       - vprodbdata:/var/lib/mysql
+      - ./logs/mysql:/var/log/mysql
     environment:
-      - MYSQL_ROOT_PASSWORD=vprodbpass
+      - MYSQL_ROOT_PASSWORD=${DB_PASSWORD:-vprodbpass}
+      - MYSQL_DATABASE=${DB_NAME:-accounts}
+      - MYSQL_USER=${DB_USERNAME:-vprouser}
+      - MYSQL_PASSWORD=${DB_PASSWORD:-vprodbpass}
+    networks:
+      - vprofile-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-vprodbpass}"]
+      timeout: 20s
+      retries: 10
 
   vprocache01:
-    image: memcached
+    image: memcached:alpine
+    container_name: vprocache01
     ports:
-      - "11211:11211"
+      - "${MEMCACHED_ACTIVE_PORT:-11211}:11211"
+    command: memcached -m 128
+    networks:
+      - vprofile-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "echo stats | nc localhost 11211 | grep -q uptime"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   vpromq01:
-    image: rabbitmq
+    image: rabbitmq:3-management-alpine
+    container_name: vpromq01
     ports:
-      - "5672:5672"
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "15672:15672"  # Management UI
+    volumes:
+      - vpromqdata:/var/lib/rabbitmq
     environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USERNAME:-guest}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-guest}
+    networks:
+      - vprofile-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   vproapp:
     build: 
       context: ./Docker-files/app
-    image: vprocontainers/vprofileapp
+      dockerfile: Dockerfile
+    image: vprocontainers/vprofileapp:latest
     container_name: vproapp
     ports:
       - "8080:8080"
     volumes:
       - vproappdata:/usr/local/tomcat/webapps
+      - ./logs/tomcat:/usr/local/tomcat/logs
+    environment:
+      - DB_HOST=${DB_HOST:-vprodb}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_NAME=${DB_NAME:-accounts}
+      - DB_USERNAME=${DB_USERNAME:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-vprodbpass}
+      - MEMCACHED_ACTIVE_HOST=${MEMCACHED_ACTIVE_HOST:-vprocache01}
+      - MEMCACHED_ACTIVE_PORT=${MEMCACHED_ACTIVE_PORT:-11211}
+      - MEMCACHED_STANDBY_HOST=${MEMCACHED_STANDBY_HOST:-127.0.0.2}
+      - MEMCACHED_STANDBY_PORT=${MEMCACHED_STANDBY_PORT:-11211}
+      - RABBITMQ_HOST=${RABBITMQ_HOST:-vpromq01}
+      - RABBITMQ_PORT=${RABBITMQ_PORT:-5672}
+      - RABBITMQ_USERNAME=${RABBITMQ_USERNAME:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - ELASTICSEARCH_HOST=${ELASTICSEARCH_HOST:-localhost}
+      - ELASTICSEARCH_PORT=${ELASTICSEARCH_PORT:-9300}
+      - ELASTICSEARCH_CLUSTER=${ELASTICSEARCH_CLUSTER:-vprofile}
+      - ELASTICSEARCH_NODE=${ELASTICSEARCH_NODE:-vprofilenode}
+      - SPRING_SECURITY_USER_NAME=${SPRING_SECURITY_USER_NAME:-admin_vp}
+      - SPRING_SECURITY_USER_PASSWORD=${SPRING_SECURITY_USER_PASSWORD:-admin_vp}
+      - SPRING_SECURITY_USER_ROLES=${SPRING_SECURITY_USER_ROLES:-ADMIN}
+      - JAVA_OPTS=-Djava.security.egd=file:/dev/./urandom -Xmx512m -Xms256m
+    networks:
+      - vprofile-network
+    depends_on:
+      vprodb:
+        condition: service_healthy
+      vprocache01:
+        condition: service_healthy
+      vpromq01:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     
   vproweb:
     build: 
       context: ./Docker-files/web
-    image: vprocontainers/vprofileweb
+      dockerfile: Dockerfile
+    image: vprocontainers/vprofileweb:latest
     container_name: vproweb
     ports:
       - "80:80"
+    volumes:
+      - ./logs/nginx:/var/log/nginx
+    networks:
+      - vprofile-network
+    depends_on:
+      vproapp:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
-   vprodbdata: {}
-   vproappdata: {}
+   vprodbdata:
+     driver: local
+   vproappdata:
+     driver: local
+   vpromqdata:
+     driver: local
+
+networks:
+  vprofile-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
   

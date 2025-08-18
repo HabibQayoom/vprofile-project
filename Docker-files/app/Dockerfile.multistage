@@ -1,4 +1,28 @@
+# Multi-stage Dockerfile that builds the application without requiring local Maven
+FROM maven:latest AS builder
+
+LABEL "Project"="Vprofile"
+LABEL "Author"="Imran"
+LABEL "Description"="VProfile Java Web Application Builder"
+
+# Set working directory
+WORKDIR /app
+
+# Copy pom.xml first for better Docker layer caching
+COPY pom.xml .
+
+# Download dependencies (this layer will be cached if pom.xml doesn't change)
+RUN mvn dependency:go-offline -B
+
+# Copy source code
+COPY src ./src
+
+# Build the application
+RUN mvn clean package -DskipTests -B
+
+# Production stage
 FROM tomcat:10-jdk21
+
 LABEL "Project"="Vprofile"
 LABEL "Author"="Imran"
 LABEL "Description"="VProfile Java Web Application"
@@ -17,8 +41,8 @@ RUN rm -rf /usr/local/tomcat/webapps/*
 RUN mkdir -p /usr/local/tomcat/logs \
     && mkdir -p /usr/local/tomcat/conf/Catalina/localhost
 
-# Copy the WAR file
-COPY target/vprofile-v2.war /usr/local/tomcat/webapps/ROOT.war
+# Copy the WAR file from builder stage
+COPY --from=builder /app/target/vprofile-v2.war /usr/local/tomcat/webapps/ROOT.war
 
 # Set environment variables for JVM tuning
 ENV JAVA_OPTS="-Djava.security.egd=file:/dev/./urandom -Xmx512m -Xms256m"
